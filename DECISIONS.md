@@ -70,6 +70,27 @@ Records with no embeddable text at all get `embedding = NULL` and participate in
 | `raw_metadata` | not indexed | Queries go through promoted columns |
 | `all_tags` | not indexed (GIN) | GIN on array is useful for `@>` operator; deferred until a filter like `all_tags @> '{pop}'` is in production use |
 
+### Decision: Embedding model — local sentence-transformers over OpenAI
+
+Using `sentence-transformers/all-MiniLM-L6-v2` (384 dims, local CPU) instead of OpenAI `text-embedding-3-small` (1536 dims, paid API).
+
+**Reasons:**
+- No API key or network dependency during ingest — runs fully offline
+- No per-token cost — viable for repeated re-seeding during development
+- 384 dims is sufficient for semantic music search; the additional 1152 dims from OpenAI would require a schema change (`VECTOR(1536)`) and larger HNSW index with no proven recall improvement for this use case
+- Latency: local batch encoding at 32 texts/batch is faster than sequential OpenAI API calls with rate limits
+
+**Known limitation:** `all-MiniLM-L6-v2` was trained on general text, not music-specific corpora. Semantic similarity between music descriptions may be noisier than a fine-tuned music embedding model. OpenAI's model likely produces better embeddings for nuanced descriptions. Switching is a one-line change (`EMBED_BACKEND = "openai"`) plus a migration to `VECTOR(1536)`.
+
+### Decision: search_vector maintained by trigger, not at query time
+
+`search_vector` is a stored column updated by a Postgres trigger on every INSERT and UPDATE to `songs`. The alternative — computing `to_tsvector(...)` inline at query time — was rejected for two reasons:
+
+1. **Performance:** computing the weighted tsvector across four fields on every query row, for every query, wastes CPU. The GIN index only works on a stored column — a computed expression at query time can't use the index.
+2. **Consistency:** a stored column updated by trigger is always in sync. Application code doesn't need to remember to recompute it on updates. The trigger fires automatically.
+
+**Considered and rejected:** maintaining `search_vector` in application code (e.g., computing it in `seed.py` and passing it as a parameter on INSERT). This works for the initial seed but breaks on any subsequent UPDATE that doesn't explicitly recompute the value. The trigger is the only approach that stays correct as data evolves.
+
 ---
 
 ## Part 2 — Bug Diagnosis
@@ -104,6 +125,26 @@ WHERE embedding IS NOT NULL
 ORDER BY embedding <=> $1
 LIMIT $3
 ```
+
+### Bug 3: `COALESCE(v.rank, 100)` fabricates vector evidence for FTS-only songs
+
+The broken query uses `COALESCE(v.rank, 100)` in the fusion CTE:
+
+```sql
+(1.0 / (60 + COALESCE(v.rank, 100))) + (1.0 / (60 + COALESCE(f.rank, 100))) AS score
+```
+
+When a song appears in FTS results but not in vector results, `v.rank` is NULL — it was never retrieved by the vector CTE. Substituting 100 treats the song as if it ranked #100 in vector search, adding a score contribution of `1/160 = 0.00625`. This fabricates evidence: no vector data was retrieved for that song, but it receives a nonzero vector score.
+
+When FTS crashes entirely (Bug 1), every song gets `f.rank = NULL → COALESCE to 100 → 0.00625` added from the FTS side as well. The result is a uniform constant added to all songs — the FTS signal contributes nothing to ranking, but scores appear nonzero, masking the fact that FTS is completely broken.
+
+**Fix:** wrap the entire division in COALESCE:
+
+```sql
+COALESCE(1.0 / ($5 + v.rank), 0.0) + COALESCE(1.0 / ($5 + f.rank), 0.0)
+```
+
+If `v.rank` is NULL, the division is NULL, and COALESCE returns 0.0. A song only scores from signals that actually retrieved it.
 
 ---
 
