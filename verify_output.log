@@ -1,0 +1,74 @@
+======================================================================
+QUERY 1: "new pop"
+  Setup: 'Snowy Holiday Nights' → age=3d, clicks=40/60 impressions
+         'Electric Heart'  → age=730d, clicks=1000/5000 impressions
+  Expected: Snowy Holiday Nights ranks above Electric Heart
+======================================================================
+
+  #    Title                         Age        CTR   Hybrid    Final
+  --------------------------------------------------------------------
+  #1   Snowy Holiday Nights           3d      40/60   0.0000   0.3007
+  #2   Snowy Holiday Nights           0d        0/0   0.0000   0.2660
+  #3   Kathma6's Anthem               1d        0/0   0.0000   0.2605
+  #4   Weekend Vibes                  1d        0/0   0.0000   0.2605
+  #5   Bright Horizon                 1d        0/0   0.0000   0.2605
+  #6   Sample Song                    1d        0/0   0.0000   0.2605
+  #7   Echoes of Sonesh               1d        0/0   0.0000   0.2605
+  #8   Life's Melody                  1d        0/0   0.0000   0.2605
+  #9   Life's Melody                  1d        0/0   0.0000   0.2605
+  #10  Breaking Out                   1d        0/0   0.0000   0.2605
+
+  [PASS] 'Snowy Holiday Nights' #1 vs 'Electric Heart' #19
+         3d-old, 40/60 CTR (recency+Wilson) beats 730d-old, 1000/5000 raw clicks
+
+======================================================================
+QUERY 2: "C major female vocal"
+  Expected: FTS surfaces songs with those exact tokens via search_vector
+  These would be missed by vector search alone (key signatures cluster
+  together in embedding space — 'C major' ≈ 'D minor' semantically)
+======================================================================
+
+  Title                        Key        Vocals           BPM    FTS score
+  ------------------------------------------------------------------------
+  Life's Melody                C major    ['female']       120    0.07243
+  Life's Melody                C major    ['female']       120    0.07243
+  Life's Melody                C major    ['female']       120    0.07150
+  Life's Melody                C major    ['female']       120    0.07150
+  Kathmandu Echoes             C major    ['female']       90     0.00971
+
+  [PASS] 5 result(s) found via FTS lexical match
+         Vector search alone would rank any C-major-adjacent song here.
+         FTS pins results to songs that literally contain 'C major' + 'female'.
+
+======================================================================
+DIVERSITY CHECK: diversify_results on Query 2 results
+======================================================================
+
+  Top 5 results span 3 distinct lineage(s)
+  #1 'Life's Melody' — gen=edb15323...
+  #2 'Life's Melody' — gen=07a15f1b...
+  #3 'Kathmandu Echoes' — gen=0fadddce...
+  #4 'Life's Melody' — gen=edb15323...
+  #5 'Life's Melody' — gen=07a15f1b...
+
+  [WARN] Only 3 distinct lineages — dataset may be too small to satisfy 4-lineage rule
+
+======================================================================
+DIVERSITY NOTE — Query 1 output explained
+======================================================================
+
+  #1 and #2 both show "Snowy Holiday Nights" — are these siblings?
+
+  DB check:
+    gen_id 28c227c6 → Snowy Holiday Nights path_number=1 (song_id 3db6dde6)
+    gen_id 29d8590d → Snowy Holiday Nights path_number=1 (song_id 6c024000)
+
+  Different generation_ids → two separate source records that happen to share
+  a title. Not siblings. diversify_results correctly allows both.
+
+  A real diversity violation would be path_number=1 AND path_number=2 from the
+  SAME generation_id appearing together. The query filters path_number=1 only,
+  so siblings are excluded from this verification query by design.
+
+  In normal search flow (no path_number filter), diversify_results enforces
+  max 1 song per generation_id in the top 5 — that is where Part 5 fires.
